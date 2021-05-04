@@ -179,6 +179,22 @@
     </func>
 
     <func>
+      <name name="read" arity="1" since=""/>
+      <fsummary>Reads the remaining time before the timer identified
+        by <c>TRef</c> expires.</fsummary>
+      <desc>
+        <p>Reads the remaining time before a previously created time-out
+          expires, in milliseconds. <c><anno>TRef</anno></c> is a unique
+          timer reference returned by the related timer function.</p>
+        <p>Returns <c>{ok, <anno>Remaining</anno>}</c> if the given
+          <c><anno>TRef</anno></c> exists, <c>undefined</c> if the
+          timer has already expired, or <c>{error, <anno>Reason</anno>}</c>
+          when <c><anno>TRef</anno></c> is not a timer reference.
+          </p>
+      </desc>
+    </func>
+
+    <func>
       <name name="seconds" arity="1" since=""/>
       <fsummary>Convert <c>Seconds</c> to <c>Milliseconds</c>.</fsummary>
       <desc>

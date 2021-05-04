@@ -40,6 +40,9 @@
 	 send_interval4/1,
 	 cancel1/1,
 	 cancel2/1,
+	 read1/1,
+	 read2/1,
+	 read3/1,
 	 tc/1,
 	 unique_refs/1,
 	 timer_perf/1]).
@@ -64,7 +67,8 @@ all() ->
     [apply_after, send_after1, send_after2, send_after3,
      exit_after1, exit_after2, kill_after1, kill_after2,
      apply_interval, send_interval1, send_interval2,
-     send_interval3, send_interval4, cancel1, cancel2, tc,
+     send_interval3, send_interval4, cancel1, cancel2,
+     read1, read2, read3, tc,
      unique_refs, timer_perf].
 
 groups() -> 
@@ -189,15 +193,26 @@ send_interval3(Config) when is_list(Config) ->
 %% Test that send interval stops sending msg when the receiving
 %% process terminates.
 send_interval4(Config) when is_list(Config) ->
-    timer:send_interval(500, one_time_only),
-    receive 
-	one_time_only -> ok
-    end,
-    timer_server ! {'EXIT', self(), normal}, % Should remove the timer
-    timer:send_after(600, send_intv_ok),
-    send_intv_ok = receive
-		       Msg -> Msg
-		   end.
+    RegName = list_to_atom(ref_to_list(make_ref())),
+    {Pid1, Ref1} = spawn_monitor(
+	fun () ->
+	    receive one_time_only -> ok end
+	end
+    ),
+    register(RegName, Pid1),
+    timer:send_interval(500, RegName, one_time_only),
+    receive {'DOWN', Ref1, process, Pid1, normal} -> ok end,
+    catch unregister(RegName),
+    {Pid2, Ref2} = spawn_monitor(
+	fun () ->
+	    send_intv_ok = receive Msg -> Msg end
+	end
+    ),
+    register(RegName, Pid2),
+    timer:send_after(600, RegName, send_intv_ok),
+    normal = receive {'DOWN', Ref2, process, Pid2, Reason} -> Reason end,
+    catch unregister(RegName),
+    ok.
 
 %% Test that we can cancel a timer.
 cancel1(Config) when is_list(Config) ->
@@ -208,6 +223,29 @@ cancel1(Config) when is_list(Config) ->
 %% Test cancel/1 with bad argument.
 cancel2(Config) when is_list(Config) ->
     {error, badarg} = timer:cancel(no_reference).
+
+%% Test read/1 with a one-shot timer.
+read1(Config) when is_list(Config) ->
+    {ok, TRef} = timer:send_after(1000, expired),
+    {ok, _Rem} = timer:read(TRef),
+    ok = get_mess(2000, expired),
+    undefined = timer:read(TRef),
+    ok.
+
+%% Test read/1 with an interval timer.
+read2(Config) when is_list(Config) ->
+    {ok, TRef} = timer:send_interval(1000, expired),
+    {ok, _Rem1} = timer:read(TRef),
+    ok = get_mess(2000, expired),
+    {ok, _Rem2} = timer:read(TRef),
+    timer:cancel(TRef),
+    undefined = timer:read(TRef),
+    get_mess(0, expired),
+    ok.
+
+%% Test read/1 with bad argument.
+read3(Config) when is_list(Config) ->
+    {error, badarg} = timer:read(no_reference).
 
 %% Test sleep/1 and tc/3.
 tc(Config) when is_list(Config) ->

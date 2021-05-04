@@ -23,7 +23,7 @@
 	 send_after/3, send_after/2,
 	 exit_after/3, exit_after/2, kill_after/2, kill_after/1,
 	 apply_interval/4, send_interval/3, send_interval/2,
-	 cancel/1, sleep/1, tc/1, tc/2, tc/3, now_diff/2,
+	 cancel/1, read/1, sleep/1, tc/1, tc/2, tc/3, now_diff/2,
 	 seconds/1, minutes/1, hours/1, hms/3]).
 
 -export([start_link/0, start/0, 
@@ -38,9 +38,12 @@
 -export_type([tref/0]).
 
 %% Max
--define(MAX_TIMEOUT, 16#0800000).
--define(TIMER_TAB, timer_tab).
--define(INTERVAL_TAB, timer_interval_tab).
+-define(MAX_TIMEOUT, 16#ffffffff).
+
+%% Validation macros.
+-define(valid_tref(TRef), is_reference(element(2, TRef))).
+-define(valid_time(Time), is_integer(Time), Time >= 0).
+-define(valid_mfa(M, F, A), is_atom(M), is_atom(F), is_list(A)).
 
 %%
 %% Time is in milliseconds.
@@ -51,6 +54,9 @@
 %%
 %% Interface functions
 %%
+
+%% Apply the given function of the given module with the given
+%% arguments after the given time.
 -spec apply_after(Time, Module, Function, Arguments) ->
                          {'ok', TRef} | {'error', Reason} when
       Time :: time(),
@@ -59,10 +65,14 @@
       Arguments :: [term()],
       TRef :: tref(),
       Reason :: term().
+apply_after(Time, M, F, A)
+  when ?valid_time(Time), ?valid_mfa(M, F, A) ->
+    req(apply_after, {Time, {M, F, A}});
+apply_after(_Time, _M, _F, _A) ->
+    {error, badarg}.
 
-apply_after(Time, M, F, A) ->
-    req(apply_after, {Time, {M, F, A}}).
-
+%% Send the given message to the given pid or registered name after
+%% the given time.
 -spec send_after(Time, Pid, Message) -> {'ok', TRef} | {'error', Reason} when
       Time :: time(),
       Pid :: pid() | (RegName :: atom()),
@@ -70,8 +80,9 @@ apply_after(Time, M, F, A) ->
       TRef :: tref(),
       Reason :: term().
 send_after(Time, Pid, Message) ->
-    req(apply_after, {Time, {?MODULE, send, [Pid, Message]}}).
+    apply_after(Time, ?MODULE, send, [Pid, Message]).
 
+%% Send the given message to the caller after the given time.
 -spec send_after(Time, Message) -> {'ok', TRef} | {'error', Reason} when
       Time :: time(),
       Message :: term(),
@@ -80,6 +91,8 @@ send_after(Time, Pid, Message) ->
 send_after(Time, Message) ->
     send_after(Time, self(), Message).
 
+%% Send an exit signal with the given reason to the given pid or
+%% registered name after the given time.
 -spec exit_after(Time, Pid, Reason1) -> {'ok', TRef} | {'error', Reason2} when
       Time :: time(),
       Pid :: pid() | (RegName :: atom()),
@@ -87,8 +100,10 @@ send_after(Time, Message) ->
       Reason1 :: term(),
       Reason2 :: term().
 exit_after(Time, Pid, Reason) ->
-    req(apply_after, {Time, {erlang, exit, [Pid, Reason]}}).
+    apply_after(Time, erlang, exit, [Pid, Reason]).
 
+%% Send an exit signal with the given reason to the caller after the
+%% given time.
 -spec exit_after(Time, Reason1) -> {'ok', TRef} | {'error', Reason2} when
       Time :: time(),
       TRef :: tref(),
@@ -97,6 +112,7 @@ exit_after(Time, Pid, Reason) ->
 exit_after(Time, Reason) ->
     exit_after(Time, self(), Reason).
 
+%% Kill the given pid or registered name after the given time.
 -spec kill_after(Time, Pid) -> {'ok', TRef} | {'error', Reason2} when
       Time :: time(),
       Pid :: pid() | (RegName :: atom()),
@@ -105,6 +121,7 @@ exit_after(Time, Reason) ->
 kill_after(Time, Pid) ->
     exit_after(Time, Pid, kill).
 
+%% Kill the caller after the given time.
 -spec kill_after(Time) -> {'ok', TRef} | {'error', Reason2} when
       Time :: time(),
       TRef :: tref(),
@@ -112,6 +129,8 @@ kill_after(Time, Pid) ->
 kill_after(Time) ->
     exit_after(Time, self(), kill).
 
+%% Apply the given function of the given module with the given
+%% arguments repeatedly after the given time intervals.
 -spec apply_interval(Time, Module, Function, Arguments) ->
                             {'ok', TRef} | {'error', Reason} when
       Time :: time(),
@@ -120,9 +139,14 @@ kill_after(Time) ->
       Arguments :: [term()],
       TRef :: tref(),
       Reason :: term().
-apply_interval(Time, M, F, A) ->
-    req(apply_interval, {Time, self(), {M, F, A}}).
+apply_interval(Time, M, F, A)
+  when ?valid_time(Time), ?valid_mfa(M, F, A) ->
+    req(apply_interval, {Time, self(), {M, F, A}});
+apply_interval(_Time, _M, _F, _A) ->
+    {error, badarg}.
 
+%% Send the given message to the given pid or registered name repeatedly
+%% after the given time intervals.
 -spec send_interval(Time, Pid, Message) ->
                            {'ok', TRef} | {'error', Reason} when
       Time :: time(),
@@ -130,9 +154,22 @@ apply_interval(Time, M, F, A) ->
       Message :: term(),
       TRef :: tref(),
       Reason :: term().
-send_interval(Time, Pid, Message) ->
-    req(apply_interval, {Time, Pid, {?MODULE, send, [Pid, Message]}}).
+send_interval(Time, Pid, Message)
+  when ?valid_time(Time), is_pid(Pid) ->
+    req(apply_interval, {Time, Pid, {?MODULE, send, [Pid, Message]}});
+send_interval(Time, RegName, Message)
+  when ?valid_time(Time), is_atom(RegName) ->
+    case get_pid(RegName) of
+	Pid when is_pid(Pid) ->
+	    req(apply_interval, {Time, Pid, {?MODULE, send, [Pid, Message]}});
+	_ ->
+	    {error, badarg}
+    end;
+send_interval(_Time, _PidOrRegName, _Message) ->
+    {error, badarg}.
 
+%% Send the given message to the caller repeatedly after the given
+%% time intervals.
 -spec send_interval(Time, Message) -> {'ok', TRef} | {'error', Reason} when
       Time :: time(),
       Message :: term(),
@@ -141,14 +178,33 @@ send_interval(Time, Pid, Message) ->
 send_interval(Time, Message) ->
     send_interval(Time, self(), Message).
 
+%% Get the time left before the given timer fires.
+-spec read(TRef) -> 'undefined' | {'ok', Remaining} | {'error', Reason} when
+      TRef :: tref(),
+      Remaining :: time(),
+      Reason :: term().
+read(TRef) when ?valid_tref(TRef) ->
+    req(read, TRef, undefined);
+read(_TRef) ->
+    {error, badarg}.
+
+%% Cancel the given timer.
 -spec cancel(TRef) -> {'ok', 'cancel'} | {'error', Reason} when
       TRef :: tref(),
       Reason :: term().
-cancel(BRef) ->
-    req(cancel, BRef).
+cancel(TRef) when ?valid_tref(TRef) ->
+    req(cancel, TRef, undefined);
+cancel(_TRef) ->
+    {error, badarg}.
 
+%% Suspend the calling process for the given time.
 -spec sleep(Time) -> 'ok' when
       Time :: timeout().
+sleep(T) when is_integer(T), T>?MAX_TIMEOUT ->
+    receive
+    after ?MAX_TIMEOUT ->
+	sleep(T-?MAX_TIMEOUT)
+    end;
 sleep(T) ->
     receive
     after T -> ok
@@ -249,12 +305,13 @@ start() ->
 start_link() ->
     gen_server:start_link({local, timer_server}, ?MODULE, [], []).    
 
--spec init([]) -> {'ok', [], 'infinity'}.
+-type timers() :: ets:tab().
+
+-spec init([]) -> {'ok', timers()}.
 init([]) ->
     process_flag(trap_exit, true),
-    ?TIMER_TAB = ets:new(?TIMER_TAB, [named_table,ordered_set,protected]),
-    ?INTERVAL_TAB = ets:new(?INTERVAL_TAB, [named_table,protected]),
-    {ok, [], infinity}.
+    Tab = ets:new(?MODULE, [public]),
+    {ok, Tab}.
 
 -spec ensure_started() -> 'ok'.
 ensure_started() ->
@@ -269,184 +326,228 @@ ensure_started() ->
 
 %% server calls
 
-req(Req, Arg) ->
-    SysTime = system_time(),
+req(Req, Arg, SysTime) ->
     ensure_started(),
     gen_server:call(timer_server, {Req, Arg, SysTime}, infinity).
 
-%%
-%% handle_call(Request, From, Timers) -> 
-%%  {reply, Response, Timers, Timeout}
+req(Req, Arg) ->
+    req(Req, Arg, tstamp()).
+
 %%
 %% Time and Timeout is in milliseconds. Started is in microseconds.
 %%
--type timers() :: term(). % XXX: refine?
-
 -spec handle_call(term(), term(), timers()) ->
-        {'reply', term(), timers(), timeout()} | {'noreply', timers(), timeout()}.
-handle_call({apply_after, {Time, Op}, Started}, _From, _Ts) 
-  when is_integer(Time), Time >= 0 ->
-    BRef = {Started + 1000*Time, make_ref()},
-    Timer = {BRef, timeout, Op},
-    ets:insert(?TIMER_TAB, Timer),
-    Timeout = timer_timeout(system_time()),
-    {reply, {ok, BRef}, [], Timeout};
-handle_call({apply_interval, {Time, To, MFA}, Started}, _From, _Ts) 
-  when is_integer(Time), Time >= 0 ->
-    %% To must be a pid or a registered name
-    case get_pid(To) of
-	Pid when is_pid(Pid) ->
-	    catch link(Pid),
-	    SysTime = system_time(),
-	    Ref = make_ref(),
-	    BRef1 = {interval, Ref},
-	    Interval = Time*1000,
-	    BRef2 = {Started + Interval, Ref},
-	    Timer = {BRef2, {repeat, Interval, Pid}, MFA},
-	    ets:insert(?INTERVAL_TAB, {BRef1,BRef2,Pid}),
-	    ets:insert(?TIMER_TAB, Timer),
-	    Timeout = timer_timeout(SysTime),
-	    {reply, {ok, BRef1}, [], Timeout};
-	_ ->
-	    {reply, {error, badarg}, [], next_timeout()}
-    end;
-handle_call({cancel, BRef = {_Time, Ref}, _}, _From, Ts) 
-  when is_reference(Ref) ->
-    delete_ref(BRef),
-    {reply, {ok, cancel}, Ts, next_timeout()};
-handle_call({cancel, _BRef, _}, _From, Ts) ->
-    {reply, {error, badarg}, Ts, next_timeout()};
-handle_call({apply_after, _, _}, _From, Ts) ->
-    {reply, {error, badarg}, Ts, next_timeout()};
-handle_call({apply_interval, _, _}, _From, Ts) ->
-    {reply, {error, badarg}, Ts, next_timeout()};
-handle_call(_Else, _From, Ts) ->		  % Catch anything else
-    {noreply, Ts, next_timeout()}.
+        {'reply', term(), timers()} | {'noreply', timers()}.
+% One-shot timer.
+handle_call({apply_after, {Time, MFA}, Started}, _From, Tab) ->
+    TRef = {Started, make_ref()},
+    ok = timeout_timer(TRef, Time, MFA, Tab),
+    {reply, {ok, TRef}, Tab};
+% Interval timer.
+handle_call({apply_interval, {Time, Pid, MFA}, Started}, _From, Tab) ->
+    TRef = {Started, make_ref()},
+    ok = interval_timer(TRef, Time, Pid, MFA, Tab),
+    {reply, {ok, TRef}, Tab};
+handle_call({read, TRef, _}, From, Tab) ->
+    _ = spawn(
+	fun () ->
+	    Reply = case ets:lookup(Tab, TRef) of
+		[{TRef, TPid, _}] ->
+		    MRef = monitor(process, TPid),
+		    TPid ! {read, {self(), MRef}},
+		    receive
+			{MRef, Rem} ->
+			    {ok, Rem};
+			{'DOWN', MRef, process, TPid, _Reason} ->
+			    undefined
+		    end;
+		[] ->
+		    undefined
+	    end,
+	    gen_server:reply(From, Reply)
+	end
+    ),
+    {noreply, Tab};
+% Cancel a timer.
+handle_call({cancel, TRef, _}, From, Tab) -> 
+    _ = spawn(
+	fun () ->
+	    ok = do_cancel(TRef, Tab),
+	    gen_server:reply(From, {ok, cancel})
+	end
+    ),
+    {noreply, Tab};
+% Get server status, ie the number of one-shot and interval timers.
+% For debugging/testing only.
+handle_call(get_status, From, Tab) ->
+    spawn(
+	fun () ->
+	    Status = do_get_status(Tab),
+	    gen_server:reply(From, Status)
+	end
+    ),
+    {noreply, Tab};
+% Ignore unexpected call messages.
+handle_call(_Other, _From, Tab) ->
+    {noreply, Tab}.
 
--spec handle_info(term(), timers()) -> {'noreply', timers(), timeout()}.
-handle_info(timeout, Ts) ->                       % Handle timeouts 
-    Timeout = timer_timeout(system_time()),
-    {noreply, Ts, Timeout};
-handle_info({'EXIT',  Pid, _Reason}, Ts) ->       % Oops, someone died
-    pid_delete(Pid),
-    {noreply, Ts, next_timeout()};
-handle_info(_OtherMsg, Ts) ->                     % Other Msg's
-    {noreply, Ts, next_timeout()}.
+-spec handle_info(term(), timers()) -> {'noreply', timers()}.
+% A linked process terminated. Should not happen,
+% as the timer processes unlink themselves before terminating.
+handle_info({'EXIT', TPid, _Reason}, Tab) ->
+    spawn(
+	fun () ->
+	    ets:match_delete(Tab, {'_', TPid, '_'})
+	end
+    ),
+    {noreply, Tab};
+% Ignore unexpected info messages.
+handle_info(_Other, Tab) ->
+    {noreply, Tab}.
 
--spec handle_cast(term(), timers()) -> {'noreply', timers(), timeout()}.
-handle_cast(_Req, Ts) ->                          % Not predicted but handled
-    {noreply, Ts, next_timeout()}.
+-spec handle_cast(term(), timers()) -> {'noreply', timers()}.
+% Ignore unexpected cast messagess.
+handle_cast(_Other, Tab) ->
+    {noreply, Tab}.
 
 -spec terminate(term(), _State) -> 'ok'.
-terminate(_Reason, _State) ->
+% Timer server terminating normally. This should not happen,
+% but if it does we need to tell the timers to cancel, because
+% they will not be terminated via their links in this case.
+terminate(normal, Tab) ->
+    ets:foldl(
+	fun ({_, TPid, _}, _) ->
+	    TPid ! cancel,
+	    ok
+	end,
+	ok,
+	Tab
+    );
+% Other termination.
+terminate(_Reason, _Tab) ->
     ok.
 
 -spec code_change(term(), State, term()) -> {'ok', State}.
 code_change(_OldVsn, State, _Extra) ->
     %% According to the man for gen server no timer can be set here.
-    {ok, State}.				
+    {ok, State}.
 
-%% 
-%% timer_timeout(SysTime)
-%%
-%% Apply and remove already timed-out timers. A timer is a tuple
-%% {Time, BRef, Op, MFA}, where Time is in microseconds.
-%% Returns {Timeout, Timers}, where Timeout is in milliseconds.
-%%
-timer_timeout(SysTime) ->
-    case ets:first(?TIMER_TAB) of
-	'$end_of_table' -> 
-	    infinity;
-	{Time, _Ref} when Time > SysTime ->
-	    Timeout = (Time - SysTime + 999) div 1000,
-	    %% Returned timeout must fit in a small int
-	    erlang:min(Timeout, ?MAX_TIMEOUT);
-	Key ->
-	    case ets:lookup(?TIMER_TAB, Key) of
-		[{Key, timeout, MFA}] ->
-		    ets:delete(?TIMER_TAB,Key),
-		    do_apply(MFA),
-		    timer_timeout(SysTime);
-		[{{Time, Ref}, Repeat = {repeat, Interv, To}, MFA}] ->
-		    ets:delete(?TIMER_TAB,Key),
-		    NewTime = Time + Interv,
-		    %% Update the interval entry (last in table)
-		    ets:insert(?INTERVAL_TAB,{{interval,Ref},{NewTime,Ref},To}),
-		    do_apply(MFA),
-		    ets:insert(?TIMER_TAB, {{NewTime, Ref}, Repeat, MFA}),
-		    timer_timeout(SysTime)
-	    end
-    end.
-
-%%
-%% delete_ref 
-%%
-
-delete_ref(BRef = {interval, _}) ->
-    case ets:lookup(?INTERVAL_TAB, BRef) of
-	[{_, BRef2, _Pid}] ->
-	    ets:delete(?INTERVAL_TAB, BRef),
-	    ets:delete(?TIMER_TAB, BRef2);
-	_ -> % TimerReference does not exist, do nothing
+% If the pid of the given timer can be found in the timers table,
+% tell it to cancel, then wait for the timer process to go down.
+% Otherwise, do nothing.
+do_cancel(TRef, Tab) ->
+    case ets:lookup(Tab, TRef) of
+	[{TRef, TPid, _}] ->
+	    TPid ! cancel,
+	    MRef = monitor(process, TPid),
+	    receive
+		{'DOWN', MRef, process, TPid, _Reason} -> ok
+	    end;
+	[] ->
 	    ok
+    end.
+
+% Collect the numbers of one-shot and interval timers.
+do_get_status(Tab) ->
+    ets:foldl(
+	fun
+	    ({_, _, timeout}, Acc=#{timeout := N}) ->
+		Acc#{timeout => N + 1};
+	    ({_, _, interval}, Acc=#{interval := N}) ->
+		Acc#{interval => N + 1}
+	end,
+	#{timeout => 0, interval => 0},
+	Tab
+    ).
+
+% Start a one-shot timer.
+% Waits for the given time to elapse, then applies the given
+% MFA and stops. Stops without applying the MFA when a cancel
+% message is received.
+timeout_timer(TRef, Time, MFA, Tab) ->
+    TsPid = self(),
+    spawn_link(
+	fun () ->
+	    ets:insert(Tab, {TRef, self(), timeout}),
+	    case timer_recv(Time, tstamp(Time), {dummy, dummy}) of
+		stop -> ok;
+		timeout -> apply_mfa(MFA)
+	    end,
+	    ets:delete(Tab, TRef),
+	    unlink(TsPid)
+	end
+    ),
+    ok.
+
+% Start an interval timer.
+interval_timer(TRef, Time, TrgPid, MFA, Tab) ->
+    TsPid = self(),
+    spawn_link(
+	fun () ->
+	    ets:insert(Tab, {TRef, self(), interval}),
+	    TrgRef = monitor(process, TrgPid),
+	    interval_timer_loop(Time, MFA, {TrgPid, TrgRef}),
+	    ets:delete(Tab, TRef),
+	    unlink(TsPid)
+	end
+    ),
+    ok.
+
+% Interval timer loop, waits for the given time to expire,
+% then applies the given MFA and repeats. Stops without
+% applying the MFA when a cancel message is received.
+interval_timer_loop(Time, MFA, Trg) ->
+    case timer_recv(Time, tstamp(Time), Trg) of
+	stop ->
+	    stop;
+	timeout ->
+	    apply_mfa(MFA),
+	    interval_timer_loop(Time, MFA, Trg)
+    end.
+
+% Receive/wait of a timer. When the given time is greater than
+% the maximum timeout, repeats in steps of the maximum timeout.
+% When the given time has elapsed, returns timeout. Returns stop
+% when a cancel message is received.
+timer_recv(Time, TEnd, Trg = {TrgPid, TrgRef}) when Time > ?MAX_TIMEOUT ->
+    receive
+	{'DOWN', TrgRef, process, TrgPid, _Reason} ->
+	    stop;
+	cancel ->
+	    stop;
+	{read, {ReplyTo, Tag}} ->
+	    Rem = TEnd - tstamp(),
+	    ReplyTo ! {Tag, max(0, Rem div 1000)},
+	    timer_recv(ceil(Rem / 1000), TEnd, Trg)
+    after ?MAX_TIMEOUT ->
+	timer_recv(Time - ?MAX_TIMEOUT, TEnd, Trg)
     end;
-delete_ref(BRef) ->
-    ets:delete(?TIMER_TAB, BRef).
-
-%%
-%% pid_delete
-%%
-
--spec pid_delete(pid()) -> 'ok'.
-pid_delete(Pid) ->
-    IntervalTimerList = 
-	ets:select(?INTERVAL_TAB,
-		   [{{'_', '_','$1'},
-		     [{'==','$1',Pid}],
-		     ['$_']}]),
-    lists:foreach(fun({IntKey, TimerKey, _ }) ->
-			  ets:delete(?INTERVAL_TAB, IntKey),
-			  ets:delete(?TIMER_TAB, TimerKey)
-		  end, IntervalTimerList).
-
-%% Calculate time to the next timeout. Returned timeout must fit in a 
-%% small int.
-
--spec next_timeout() -> timeout().
-next_timeout() ->
-    case ets:first(?TIMER_TAB) of
-	'$end_of_table' -> 
-	    infinity;
-	{Time, _} ->
-	    erlang:min(positive((Time - system_time() + 999) div 1000), ?MAX_TIMEOUT)
+timer_recv(Time, TEnd, Trg = {TrgPid, TrgRef}) ->
+    receive
+	{'DOWN', TrgRef, process, TrgPid, _Reason} ->
+	    stop;
+	cancel ->
+	    stop;
+	{read, {ReplyTo, Tag}} ->
+	    Rem = TEnd - tstamp(),
+	    ReplyTo ! {Tag, max(0, Rem div 1000)},
+	    timer_recv(ceil(Rem / 1000), TEnd, Trg)
+    after Time ->
+	timeout
     end.
 
-%% Help functions
-do_apply({M,F,A}) ->
-    case {M, F, A} of
-	{?MODULE, send, A} -> 
-	    %% If send op. send directly, (faster than spawn)
-	    catch send(A);
-	{erlang, exit, [Name, Reason]} ->
-	    catch exit(get_pid(Name), Reason);
-	_ -> 
-	    %% else spawn process with the operation
-	    catch spawn(M,F,A)      
-    end.
+% Apply the given MFA.
+apply_mfa({erlang, exit, [Name, Reason]}) ->
+    catch exit(get_pid(Name), Reason),
+    ok;
+apply_mfa({?MODULE, send, [To, Msg]}) ->
+    To ! Msg,
+    ok;
+apply_mfa({M, F, A}) ->
+    catch spawn(M, F, A),
+    ok.
 
-positive(X) ->
-    erlang:max(X, 0).
-
-
-%%
-%%  system_time() -> time in microseconds
-%%
-system_time() ->
-    erlang:monotonic_time(1000000).
-
-send([Pid, Msg]) ->
-    Pid ! Msg.
-
+% Get the pid for a registered name.
 get_pid(Name) when is_pid(Name) ->
     Name;
 get_pid(undefined) ->
@@ -456,21 +557,21 @@ get_pid(Name) when is_atom(Name) ->
 get_pid(_) ->
     undefined.
 
-%%
-%% get_status() -> 
-%%    {{TimerTabName,TotalNumTimers},{IntervalTabName,NumIntervalTimers}}
-%%
+% Timestamp, current monotonic time in microseconds.
+tstamp() ->
+    tstamp(0).
+
+tstamp(Offset) ->
+    erlang:monotonic_time(microsecond) + 1000 * Offset.
+
 %% This function is for test purposes only; it is used by the test suite.
 %% There is a small possibility that there is a mismatch of one entry 
 %% between the 2 tables if this call is made when the timer server is 
 %% in the middle of a transaction
  
 -spec get_status() ->
-	{{?TIMER_TAB,non_neg_integer()},{?INTERVAL_TAB,non_neg_integer()}}.
+	{{timer_tab, non_neg_integer()}, {interval_tab, non_neg_integer()}}.
 
 get_status() ->
-    Info1 = ets:info(?TIMER_TAB),
-    {size,TotalNumTimers} = lists:keyfind(size, 1, Info1),
-    Info2 = ets:info(?INTERVAL_TAB),
-    {size,NumIntervalTimers} = lists:keyfind(size, 1, Info2),
-    {{?TIMER_TAB,TotalNumTimers},{?INTERVAL_TAB,NumIntervalTimers}}.
+    #{timeout := T, interval := I} = gen_server:call(timer_server, get_status, infinity),
+    {{timer_tab, T + I}, {interval_tab, I}}.
