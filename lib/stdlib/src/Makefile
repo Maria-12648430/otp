@@ -122,6 +122,7 @@ MODULES= \
 	supervisor_bridge \
 	sys \
 	timer \
+	tuplelists \
 	unicode \
 	unicode_util \
 	uri_string \
