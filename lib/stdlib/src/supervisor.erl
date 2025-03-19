@@ -63,7 +63,8 @@ definition for the supervisor flags is as follows:
 sup_flags() = #{strategy => strategy(),           % optional
                 intensity => non_neg_integer(),   % optional
                 period => pos_integer(),          % optional
-                auto_shutdown => auto_shutdown()} % optional
+                auto_shutdown => auto_shutdown(), % optional
+                hibernate_after => timeout()}     % optional
 ```
 
 #### Restart Strategies
@@ -417,7 +418,8 @@ see more details [above](`m:supervisor#sup_flags`).
 -type sup_flags() :: #{strategy => strategy(),           % optional
 		       intensity => non_neg_integer(),   % optional
 		       period => pos_integer(),          % optional
-		       auto_shutdown => auto_shutdown()} % optional
+		       auto_shutdown => auto_shutdown(), % optional
+		       hibernate_after => timeout()}     % optional
                    | {RestartStrategy :: strategy(),
                       Intensity :: non_neg_integer(),
                       Period :: pos_integer()}.
@@ -425,12 +427,12 @@ see more details [above](`m:supervisor#sup_flags`).
 
 %%--------------------------------------------------------------------------
 %% Defaults
--define(default_flags, #{strategy      => one_for_one,
-			 intensity     => 1,
-			 period        => 5,
-			 auto_shutdown => never}).
--define(default_child_spec, #{restart  => permanent,
-			      type     => worker}).
+-define(default_flags, #{strategy        => one_for_one,
+			 intensity       => 1,
+			 period          => 5,
+			 auto_shutdown   => never}).
+-define(default_child_spec, #{restart    => permanent,
+			      type       => worker}).
 %% Default 'shutdown' is 5000 for workers and infinity for supervisors.
 %% Default 'modules' is [M], where M comes from the child's start {M,F,A}.
 
@@ -461,6 +463,7 @@ see more details [above](`m:supervisor#sup_flags`).
                 nrestarts = 0,
 		dynamic_restarts = 0   :: non_neg_integer(),
 		auto_shutdown = never  :: auto_shutdown(),
+		hibernate_after        :: timeout(),
 	        module,
 	        args}).
 -type state() :: #state{}.
@@ -912,10 +915,7 @@ init_children(State, StartSpec) ->
         {ok, Children} ->
             case start_children(Children, SupName) of
                 {ok, NChildren} ->
-                    %% Static supervisor are not expected to
-                    %% have much work to do so hibernate them
-                    %% to improve memory handling.
-                    {ok, State#state{children = NChildren}, hibernate};
+                    {ok, State#state{children = NChildren}, State#state.hibernate_after};
                 {error, NChildren, Reason} ->
                     _ = terminate_children(NChildren, SupName),
                     {stop, {shutdown, Reason}}
@@ -927,10 +927,7 @@ init_children(State, StartSpec) ->
 init_dynamic(State, [StartSpec]) ->
     case check_startspec([StartSpec], State#state.auto_shutdown) of
         {ok, Children} ->
-            %% Simple one for one supervisors are expected to
-            %% have many children coming and going so do not
-            %% hibernate.
-	    {ok, dyn_init(State#state{children = Children})};
+	    {ok, dyn_init(State#state{children = Children}), State#state.hibernate_after};
         Error ->
             {stop, {start_spec, Error}}
     end;
@@ -1008,43 +1005,43 @@ handle_call({start_child, EArgs}, _From, State) when ?is_simple(State) ->
     Args = A ++ EArgs,
     case do_start_child_i(M, F, Args) of
 	{ok, undefined} ->
-	    {reply, {ok, undefined}, State};
+	    {reply, {ok, undefined}, State, State#state.hibernate_after};
 	{ok, Pid} ->
 	    NState = dyn_store(Pid, Args, State),
-	    {reply, {ok, Pid}, NState};
+	    {reply, {ok, Pid}, NState, State#state.hibernate_after};
 	{ok, Pid, Extra} ->
 	    NState = dyn_store(Pid, Args, State),
-	    {reply, {ok, Pid, Extra}, NState};
+	    {reply, {ok, Pid, Extra}, NState, State#state.hibernate_after};
 	What ->
-	    {reply, What, State}
+	    {reply, What, State, State#state.hibernate_after}
     end;
 
 handle_call({start_child, ChildSpec}, _From, State) ->
     case check_childspec(ChildSpec, State#state.auto_shutdown) of
 	{ok, Child} ->
 	    {Resp, NState} = handle_start_child(Child, State),
-	    {reply, Resp, NState};
+	    {reply, Resp, NState, State#state.hibernate_after};
 	What ->
-	    {reply, {error, What}, State}
+	    {reply, {error, What}, State, State#state.hibernate_after}
     end;
 
 %% terminate_child for simple_one_for_one can only be done with pid
 handle_call({terminate_child, Id}, _From, State) when not is_pid(Id),
                                                       ?is_simple(State) ->
-    {reply, {error, simple_one_for_one}, State};
+    {reply, {error, simple_one_for_one}, State, State#state.hibernate_after};
 
 handle_call({terminate_child, Id}, _From, State) ->
     case find_child(Id, State) of
 	{ok, Child} ->
 	    do_terminate(Child, State#state.name),
-            {reply, ok, del_child(Child, State)};
+            {reply, ok, del_child(Child, State), State#state.hibernate_after};
 	error ->
-	    {reply, {error, not_found}, State}
+	    {reply, {error, not_found}, State, State#state.hibernate_after}
     end;
 
 %% restart_child request is invalid for simple_one_for_one supervisors
 handle_call({restart_child, _Id}, _From, State) when ?is_simple(State) ->
-    {reply, {error, simple_one_for_one}, State};
+    {reply, {error, simple_one_for_one}, State, State#state.hibernate_after};
 
 handle_call({restart_child, Id}, _From, State) ->
     case find_child(Id, State) of
@@ -1052,44 +1049,44 @@ handle_call({restart_child, Id}, _From, State) ->
 	    case do_start_child(State#state.name, Child, debug_report) of
 		{ok, Pid} ->
 		    NState = set_pid(Pid, Id, State),
-		    {reply, {ok, Pid}, NState};
+		    {reply, {ok, Pid}, NState, State#state.hibernate_after};
 		{ok, Pid, Extra} ->
 		    NState = set_pid(Pid, Id, State),
-		    {reply, {ok, Pid, Extra}, NState};
+		    {reply, {ok, Pid, Extra}, NState, State#state.hibernate_after};
 		Error ->
-		    {reply, Error, State}
+		    {reply, Error, State, State#state.hibernate_after}
 	    end;
 	{ok, #child{pid=?restarting(_)}} ->
-	    {reply, {error, restarting}, State};
+	    {reply, {error, restarting}, State, State#state.hibernate_after};
 	{ok, _} ->
-	    {reply, {error, running}, State};
+	    {reply, {error, running}, State, State#state.hibernate_after};
 	_ ->
-	    {reply, {error, not_found}, State}
+	    {reply, {error, not_found}, State, State#state.hibernate_after}
     end;
 
 %% delete_child request is invalid for simple_one_for_one supervisors
 handle_call({delete_child, _Id}, _From, State) when ?is_simple(State) ->
-    {reply, {error, simple_one_for_one}, State};
+    {reply, {error, simple_one_for_one}, State, State#state.hibernate_after};
 
 handle_call({delete_child, Id}, _From, State) ->
     case find_child(Id, State) of
 	{ok, Child} when Child#child.pid =:= undefined ->
 	    NState = remove_child(Id, State),
-	    {reply, ok, NState};
+	    {reply, ok, NState, State#state.hibernate_after};
 	{ok, #child{pid=?restarting(_)}} ->
-	    {reply, {error, restarting}, State};
+	    {reply, {error, restarting}, State, State#state.hibernate_after};
 	{ok, _} ->
-	    {reply, {error, running}, State};
+	    {reply, {error, running}, State, State#state.hibernate_after};
 	_ ->
-	    {reply, {error, not_found}, State}
+	    {reply, {error, not_found}, State, State#state.hibernate_after}
     end;
 
 handle_call({get_childspec, Id}, _From, State) ->
     case find_child(Id, State) of
 	{ok, Child} ->
-            {reply, {ok, child_to_spec(Child)}, State};
+            {reply, {ok, child_to_spec(Child)}, State, State#state.hibernate_after};
 	error ->
-	    {reply, {error, not_found}, State}
+	    {reply, {error, not_found}, State, State#state.hibernate_after}
     end;
 
 handle_call(which_children, _From, State) when ?is_simple(State) ->
@@ -1097,7 +1094,7 @@ handle_call(which_children, _From, State) when ?is_simple(State) ->
     Reply = dyn_map(fun(?restarting(_)) -> {undefined, restarting, CT, Mods};
                        (Pid) -> {undefined, Pid, CT, Mods}
                     end, State),
-    {reply, Reply, State};
+    {reply, Reply, State, State#state.hibernate_after};
 
 handle_call(which_children, _From, State) ->
     Resp =
@@ -1110,12 +1107,12 @@ handle_call(which_children, _From, State) ->
                   {Id, Pid, ChildType, Mods}
           end,
           State#state.children),
-    {reply, Resp, State};
+    {reply, Resp, State, State#state.hibernate_after};
 
 %% which_child for simple_one_for_one can only be done with pid
 handle_call({which_child, Id}, _From, State) when not is_pid(Id),
                                                   ?is_simple(State) ->
-    {reply, {error, simple_one_for_one}, State};
+    {reply, {error, simple_one_for_one}, State, State#state.hibernate_after};
 
 handle_call({which_child, Pid}, _From, State) when ?is_simple(State) ->
     Result = case find_dynamic_child(Pid, State) of
@@ -1128,7 +1125,7 @@ handle_call({which_child, Pid}, _From, State) when ?is_simple(State) ->
 		 error ->
 		     {error, not_found}
 	     end,
-    {reply, Result, State};
+    {reply, Result, State, State#state.hibernate_after};
 
 handle_call({which_child, Id}, _From, State) ->
     Result = case find_child(Id, State) of
@@ -1141,7 +1138,7 @@ handle_call({which_child, Id}, _From, State) ->
 		 error ->
 		     {error, not_found}
 	     end,
-    {reply, Result, State};
+    {reply, Result, State, State#state.hibernate_after};
 
 handle_call(count_children, _From,  #state{dynamic_restarts = Restarts} = State)
   when ?is_simple(State) ->
@@ -1154,7 +1151,7 @@ handle_call(count_children, _From,  #state{dynamic_restarts = Restarts} = State)
 		worker -> [{specs, 1}, {active, Active},
 			   {supervisors, 0}, {workers, Sz}]
 	    end,
-    {reply, Reply, State};
+    {reply, Reply, State, State#state.hibernate_after};
 
 handle_call(count_children, _From, State) ->
     %% Specs and children are together on the children list...
@@ -1166,7 +1163,7 @@ handle_call(count_children, _From, State) ->
     %% Reformat counts to a property list.
     Reply = [{specs, Specs}, {active, Active},
 	     {supervisors, Supers}, {workers, Workers}],
-    {reply, Reply, State}.
+    {reply, Reply, State, State#state.hibernate_after}.
 
 count_child(#child{pid = Pid, child_type = worker},
 	    {Specs, Active, Supers, Workers}) ->
@@ -1193,12 +1190,12 @@ handle_cast({try_again_restart,TryAgainId}, State) ->
 	{ok, Child = #child{pid=?restarting(_)}} ->
 	    case restart(Child,State) of
 		{ok, State1} ->
-		    {noreply, State1};
+		    {noreply, State1, State1#state.hibernate_after};
 		{shutdown, State1} ->
 		    {stop, shutdown, State1}
 	    end;
 	_ ->
-	    {noreply,State}
+	    {noreply,State, State#state.hibernate_after}
     end.
 
 %%
@@ -1208,10 +1205,14 @@ handle_cast({try_again_restart,TryAgainId}, State) ->
 -spec handle_info(term(), state()) ->
         {'noreply', state()} | {'stop', 'shutdown', state()}.
 
+handle_info(timeout, State) ->
+    logger:notice("Hibernating supervisor ~p", [self()]),
+    {noreply, State, hibernate};
+
 handle_info({'EXIT', Pid, Reason}, State) ->
     case restart_child(Pid, Reason, State) of
 	{ok, State1} ->
-	    {noreply, State1};
+	    {noreply, State1, State1#state.hibernate_after};
 	{shutdown, State1} ->
 	    {stop, shutdown, State1}
     end;
@@ -1220,7 +1221,7 @@ handle_info(Msg, State) ->
     ?LOG_ERROR("Supervisor received unexpected message: ~tp~n",[Msg],
                #{domain=>[otp],
                  error_logger=>#{tag=>error}}),
-    {noreply, State}.
+    {noreply, State, State#state.hibernate_after}.
 
 %%
 %% Terminate this server.
@@ -1941,34 +1942,43 @@ init_state(SupName, Type, Mod, Args) ->
 set_flags(Flags, State) ->
     try check_flags(Flags) of
 	#{strategy := Strategy, intensity := MaxIntensity, period := Period,
-	  auto_shutdown := AutoShutdown} ->
+	  auto_shutdown := AutoShutdown, hibernate_after := HibernateAfter} ->
 	    {ok, State#state{strategy = Strategy,
 			     intensity = MaxIntensity,
 			     period = Period,
-			     auto_shutdown = AutoShutdown}}
+			     auto_shutdown = AutoShutdown,
+			     hibernate_after = HibernateAfter}}
     catch
 	Thrown -> Thrown
     end.
 
 check_flags(SupFlags) when is_map(SupFlags) ->
-    do_check_flags(maps:merge(?default_flags,SupFlags));
+    case maps:merge(?default_flags, SupFlags) of
+	#{hibernate_after := _} = MergedFlags ->
+	    do_check_flags(MergedFlags);
+	#{strategy := Strategy} = MergedFlags ->
+	    do_check_flags(MergedFlags#{hibernate_after => default_hibernate_after(Strategy)})
+    end;
 check_flags({Strategy, MaxIntensity, Period}) ->
     check_flags(#{strategy => Strategy,
 		  intensity => MaxIntensity,
 		  period => Period,
-		  auto_shutdown => never});
+		  auto_shutdown => never,
+		  hibernate_after => default_hibernate_after(Strategy)});
 check_flags(What) ->
     throw({invalid_type, What}).
 
 do_check_flags(#{strategy := Strategy,
 		 intensity := MaxIntensity,
 		 period := Period,
-		 auto_shutdown := AutoShutdown} = Flags) ->
+		 auto_shutdown := AutoShutdown,
+		 hibernate_after := HibernateAfter} = Flags) ->
     validStrategy(Strategy),
     validIntensity(MaxIntensity),
     validPeriod(Period),
     validAutoShutdown(AutoShutdown),
     validAutoShutdownForStrategy(AutoShutdown, Strategy),
+    validHibernateAfter(HibernateAfter),
     Flags.
 
 validStrategy(simple_one_for_one) -> true;
@@ -1997,9 +2007,22 @@ validAutoShutdownForStrategy(all_significant, simple_one_for_one) ->
 validAutoShutdownForStrategy(_AutoShutdown, _Strategy) ->
     true.
 
+validHibernateAfter(infinity) ->
+    true;
+validHibernateAfter(Timeout) when is_integer(Timeout), Timeout >= 0 ->
+    true;
+validHibernateAfter(What) ->
+    throw({invalid_hibernate_after, What}).
+
 
 supname(self, Mod) -> {self(), Mod};
 supname(N, _)      -> N.
+
+
+default_hibernate_after(simple_one_for_one) ->
+    infinity;
+default_hibernate_after(_) ->
+    0.
 
 %%% ------------------------------------------------------
 %%% Check that the children start specification is valid.
