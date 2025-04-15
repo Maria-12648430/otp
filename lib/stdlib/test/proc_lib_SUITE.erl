@@ -35,7 +35,7 @@
          spawn_opt/1, sp1/0, sp1_with_label/0, sp2/0, sp3/1, sp4/2,
          sp5/1, sp6/1, sp7/1, sp8/1, sp9/1, sp10/1,
          '\x{447}'/0, hibernate/1, stop/1, t_format/1, t_format_arbitrary/1]).
--export([ otp_6345/1, init_dont_hang/1]).
+-export([init_dont_hang/1]).
 
 -export([hib_loop/1, awaken/1]).
 
@@ -43,7 +43,7 @@
 	 handle_event/2, handle_call/2, handle_info/2,
 	 terminate/2]).
 
--export([otp_6345_init/1, init_dont_hang_init/1]).
+-export([init_dont_hang_init/1]).
 
 -export([report_cb/1, report_cb_chars_limit/1, log/2, rcb_tester/0]).
 
@@ -62,7 +62,7 @@ all() ->
      {group, tickets}, stop, t_format, t_format_arbitrary, report_cb].
 
 groups() -> 
-    [{tickets, [], [otp_6345, init_dont_hang]},
+    [{tickets, [], [init_dont_hang]},
      {sync_start, [], [sync_start_nolink, sync_start_link,
                        sync_start_monitor, sync_start_monitor_link,
                        sync_start_timeout, sync_start_link_timeout,
@@ -616,26 +616,6 @@ hib_receive_messages(0) -> [];
 hib_receive_messages(N) ->
     receive
 	Any -> [Any|hib_receive_messages(N-1)]
-    end.
-
-%% 'monitor' spawn_opt option.
-otp_6345(Config) when is_list(Config) ->
-    Opts = [link,monitor],
-    try
-        blupp = proc_lib:start(?MODULE, otp_6345_init, [self()],
-                               1000, Opts)
-    catch
-        error:badarg -> ok
-    end.
-
-otp_6345_init(Parent) ->
-    proc_lib:init_ack(Parent, {ok, self()}),
-    otp_6345_loop().
-
-otp_6345_loop() ->
-    receive
-	_Msg ->
-	    otp_6345_loop()
     end.
 
 %% OTP-9803. Check that proc_lib:start() doesn't hang if spawned process

@@ -93,37 +93,11 @@ processes that terminate as a result of this process terminating.
 
 %%-----------------------------------------------------------------------------
 
-%% This shall be spawn_option() -- monitor options and must be kept in sync
-%% (with erlang:spawn_opt_options())
-%%
 -doc """
-A restricted set of [spawn options](`t:spawn_option/0`). Most notably `monitor`
-is _not_ part of these options.
+Equivalent to `t:spawn_option/0`.
+Kept for legacy reasons.
 """.
--type start_spawn_option() :: 'link'
-                            | {'priority', erlang:priority_level()}
-                            | {'fullsweep_after', non_neg_integer()}
-                            | {'min_heap_size', non_neg_integer()}
-                            | {'min_bin_vheap_size', non_neg_integer()}
-                            | {'max_heap_size', erlang:max_heap_size()}
-                            | {'message_queue_data', erlang:message_queue_data() }.
-%% and this macro is used to verify that there are no monitor options
-%% which also needs to be kept in sync all kinds of monitor options
-%% in erlang:spawn_opt_options().
-%%
--define(VERIFY_NO_MONITOR_OPT(M, F, A, T, Opts),
-        Monitor = monitor,
-        case lists:member(Monitor, Opts) of
-            true ->
-                erlang:error(badarg, [M,F,A,T,Opts]);
-            false ->
-                case lists:keyfind(Monitor, 1, Opts) of
-                    false ->
-                        ok;
-                    {Monitor, _} ->
-                        erlang:error(badarg, [M,F,A,T,Opts])
-                end
-        end).
+-type start_spawn_option() :: spawn_option().
 
 -doc """
 An exception passed to `init_fail/3`. See `erlang:raise/3` for a description
@@ -368,6 +342,14 @@ exit_reason(throw, Reason, Stacktrace) ->
     {{nocatch, Reason}, Stacktrace}.
 
 
+has_monitor_opt(SpawnOpts) ->
+    lists:member(monitor, SpawnOpts) orelse
+    lists:keymember(monitor, 1, SpawnOpts).
+
+has_link_opt(SpawnOpts) ->
+    lists:member(link, SpawnOpts) orelse
+    lists:keymember(link, 1, SpawnOpts).
+
 -doc(#{equiv => start(Module, Function, Args, infinity)}).
 -spec start(Module, Function, Args) -> Ret when
       Module :: module(),
@@ -387,7 +369,7 @@ start(M, F, A) when is_atom(M), is_atom(F), is_list(A) ->
       Ret :: term() | {error, Reason :: term()}.
 
 start(M, F, A, Timeout) when is_atom(M), is_atom(F), is_list(A) ->
-    sync_start(spawn_mon(M, F, A), Timeout).
+    sync_start(spawn_mon(M, F, A), Timeout, false).
 
 -doc """
 Starts a new process synchronously. Spawns the process and waits for it to
@@ -417,25 +399,56 @@ Argument `SpawnOpts`, if specified, is passed as the last argument to the
 
 > #### Note {: .info }
 >
-> Using spawn option `monitor` is not allowed. It causes the function to fail
-> with reason `badarg`.
+> Using spawn option `monitor` or `{monitor, MonitorOpts}` will set a monitor
+> on the spawned process, just like [start_monitor/3,4,5](`start_monitor/3`).
+> In this case, `{Ret, Mon}` is returned instead of `Ret`, where `Mon` is the
+> monitor reference of the monitor that has been set up.
 >
-> Using spawn option `link` will set a link to the spawned process, just like
-> [start_link/3,4,5](`start_link/3`).
+> Using spawn option `link` or `{link, LinkOpts}` will set a link to the
+> spawned process, just like [start_link/3,4,5](`start_link/3`).
 """.
--spec start(Module, Function, Args, Time, SpawnOpts) -> Ret when
+-spec start(Module, Function, Args, Time, SpawnOpts) -> Ret | {Ret, Mon} when
       Module :: module(),
       Function :: atom(),
       Args :: [term()],
       Time :: timeout(),
       SpawnOpts :: [start_spawn_option()],
+      Mon :: reference(),
       Ret :: term() | {error, Reason :: term()}.
 
 start(M, F, A, Timeout, SpawnOpts) when is_atom(M), is_atom(F), is_list(A) ->
-    ?VERIFY_NO_MONITOR_OPT(M, F, A, Timeout, SpawnOpts),
-    sync_start(?MODULE:spawn_opt(M, F, A, [monitor|SpawnOpts]), Timeout).
+    {KeepMonitor, SpawnOpts1} = case has_monitor_opt(SpawnOpts) of
+				    true ->
+					{true, SpawnOpts};
+				    false ->
+					{false, [monitor|SpawnOpts]}
+				end,
+    sync_start(?MODULE:spawn_opt(M, F, A, SpawnOpts1), Timeout, KeepMonitor).
 
-sync_start({Pid, Ref}, Timeout) ->
+sync_start(PidRef, Timeout, true) ->
+    sync_start_keep_monitor(PidRef, Timeout);
+sync_start(PidRef, Timeout, false) ->
+    sync_start_discard_monitor(PidRef, Timeout).
+
+sync_start_keep_monitor({Pid, Ref}, Timeout) ->
+    receive
+	{ack, Pid, Return} ->
+	    {Return, Ref};
+	{nack, Pid, Return} ->
+            flush_EXIT(Pid),
+            self() ! await_DOWN(Pid, Ref),
+	    {Return, Ref};
+	{_Tag, Ref, process, Pid, Reason} = Down ->
+            flush_EXIT(Pid),
+	    self() ! Down,
+	    {{error, Reason}, Ref}
+    after Timeout ->
+            kill_flush_EXIT(Pid),
+    	    self() ! await_DOWN(Pid, Ref),
+	    {{error, timeout}, Ref}
+    end.
+
+sync_start_discard_monitor({Pid, Ref}, Timeout) ->
     receive
 	{ack, Pid, Return} ->
 	    erlang:demonitor(Ref, [flush]),
@@ -444,13 +457,13 @@ sync_start({Pid, Ref}, Timeout) ->
             flush_EXIT(Pid),
             _ = await_DOWN(Pid, Ref),
             Return;
-	{'DOWN', Ref, process, Pid, Reason} ->
+	{_Tag, Ref, process, Pid, Reason} ->
             flush_EXIT(Pid),
             {error, Reason}
     after Timeout ->
             kill_flush_EXIT(Pid),
-            _ = await_DOWN(Pid, Ref),
-            {error, timeout}
+    	    _ = await_DOWN(Pid, Ref),
+	    {error, timeout}
     end.
 
 
@@ -473,7 +486,7 @@ start_link(M, F, A) when is_atom(M), is_atom(F), is_list(A) ->
       Ret :: term() | {error, Reason :: term()}.
 
 start_link(M, F, A, Timeout) when is_atom(M), is_atom(F), is_list(A) ->
-    sync_start(?MODULE:spawn_opt(M, F, A, [link,monitor]), Timeout).
+    sync_start(?MODULE:spawn_opt(M, F, A, [link,monitor]), Timeout, false).
 
 -doc """
 Starts a new process synchronously. Spawns the process and waits for it to
@@ -497,21 +510,38 @@ process.
 
 > #### Note {: .info }
 >
-> Using spawn option `monitor` is not allowed. It causes the function to fail
-> with reason `badarg`.
+> Using spawn option `monitor` or `{monitor, MonitorOpts}` will set a monitor
+> on the spawned process, just like [start_monitor/3,4,5](`start_monitor/3`).
+> In this case, `{Ret, Mon}` is returned instead of `Ret`, where `Mon` is the
+> monitor reference of the monitor that has been set up.
+>
+> Using spawn option `link` has no effect. Using spawn option `{link, LinkOpts}`
+> can be used to customize the link that will be set up with
+> [link options](`t:erlang:link_option/0`).
 """.
--spec start_link(Module, Function, Args, Time, SpawnOpts) -> Ret when
+-spec start_link(Module, Function, Args, Time, SpawnOpts) -> Ret | {Ret, Mon} when
       Module :: module(),
       Function :: atom(),
       Args :: [term()],
       Time :: timeout(),
       SpawnOpts :: [start_spawn_option()],
+      Mon :: reference(),
       Ret :: term() | {error, Reason :: term()}.
 
 start_link(M,F,A,Timeout,SpawnOpts) when is_atom(M), is_atom(F), is_list(A) ->
-    ?VERIFY_NO_MONITOR_OPT(M, F, A, Timeout, SpawnOpts),
-    sync_start(
-      ?MODULE:spawn_opt(M, F, A, [link,monitor|SpawnOpts]), Timeout).
+    {KeepMonitor, SpawnOpts1} = case has_monitor_opt(SpawnOpts) of
+				    true ->
+					{true, SpawnOpts};
+				    false ->
+					{false, [monitor|SpawnOpts]}
+				end,
+    SpawnOpts2 = case has_link_opt(SpawnOpts1) of
+		     true ->
+			 SpawnOpts1;
+		     false ->
+			 [link|SpawnOpts1]
+		 end,
+    sync_start(?MODULE:spawn_opt(M, F, A, SpawnOpts2), Timeout, KeepMonitor).
 
 
 -doc(#{equiv => start_monitor(Module, Function, Args, infinity)}).
@@ -537,7 +567,7 @@ start_monitor(M, F, A) when is_atom(M), is_atom(F), is_list(A) ->
       Ret :: term() | {error, Reason :: term()}.
 
 start_monitor(M, F, A, Timeout) when is_atom(M), is_atom(F), is_list(A) ->
-    sync_start_monitor(spawn_mon(M, F, A), Timeout).
+    sync_start(spawn_mon(M, F, A), Timeout, true).
 
 -doc """
 Starts a new process synchronously. Spawns the process and waits for it to
@@ -556,11 +586,12 @@ when this function times out and kills the spawned process.
 
 > #### Note {: .info }
 >
-> Using spawn option `monitor` is not allowed. It causes the function to fail
-> with reason `badarg`.
+> Using spawn option `monitor` has no effect. Using spawn option
+> `{monitor, MonitorOpts}` can be used to customize the monitor that will be set
+> up with [monitor options](`t:erlang:monitor_option/0`).
 >
-> Using spawn option `link` will set a link to the spawned process, just like
-> [start_link/3,4,5](`start_link/3`).
+> Using spawn option `link` or `{link, LinkOpts}` will set a link to the spawned
+> process, just like [start_link/3,4,5](`start_link/3`).
 """.
 -doc(#{since => <<"OTP 23.0">>}).
 -spec start_monitor(Module, Function, Args, Time, SpawnOpts) -> {Ret, Mon} when
@@ -575,27 +606,13 @@ when this function times out and kills the spawned process.
 start_monitor(M,F,A,Timeout,SpawnOpts) when is_atom(M),
                                             is_atom(F),
                                             is_list(A) ->
-    ?VERIFY_NO_MONITOR_OPT(M, F, A, Timeout, SpawnOpts),
-    sync_start_monitor(
-      ?MODULE:spawn_opt(M, F, A, [monitor|SpawnOpts]), Timeout).
-
-sync_start_monitor({Pid, Ref}, Timeout) ->
-    receive
-	{ack, Pid, Return} ->
-            {Return, Ref};
-	{nack, Pid, Return} ->
-            flush_EXIT(Pid),
-            self() ! await_DOWN(Pid, Ref),
-            {Return, Ref};
-	{'DOWN', Ref, process, Pid, Reason} = Down ->
-            flush_EXIT(Pid),
-            self() ! Down,
-            {{error, Reason}, Ref}
-    after Timeout ->
-            kill_flush_EXIT(Pid),
-            self() ! await_DOWN(Pid, Ref),
-            {{error, timeout}, Ref}
-    end.
+    SpawnOpts1 = case has_monitor_opt(SpawnOpts) of
+		     true ->
+			 SpawnOpts;
+		     false ->
+			 [monitor|SpawnOpts]
+		 end,
+    sync_start(?MODULE:spawn_opt(M, F, A, SpawnOpts1), Timeout, true).
 
 
 %% We regard the existence of an {'EXIT', Pid, _} message
@@ -620,7 +637,7 @@ kill_flush_EXIT(Pid) ->
 
 await_DOWN(Pid, Ref) ->
     receive
-	{'DOWN', Ref, process, Pid, _} = Down ->
+	{_Tag, Ref, process, Pid, _} = Down ->
             Down
     end.
 
