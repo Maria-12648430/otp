@@ -475,6 +475,7 @@ handle_event(_, _, State, Data) ->
 -export(
    [start/3,start/4,start_link/3,start_link/4,
     start_monitor/3,start_monitor/4,
+    start_as_child/3, start_as_child/4,
     stop/1,stop/3,
     cast/2,call/2,call/3,
     send_request/2, send_request/4,
@@ -488,7 +489,7 @@ handle_event(_, _, State, Data) ->
 
 %% gen callbacks
 -export(
-   [init_it/6]).
+   [init_it/7]).
 
 %% sys callbacks
 -export(
@@ -538,7 +539,8 @@ handle_event(_, _, State, Data) ->
     start_opt/0,
     enter_loop_opt/0,
     start_ret/0,
-    start_mon_ret/0]).
+    start_mon_ret/0,
+    start_as_child_ret/0]).
 
 %% -define(DBG(T), erlang:display({{self(), ?MODULE, ?LINE, ?FUNCTION_NAME}, T})).
 
@@ -2220,6 +2222,11 @@ tuple.
       | 'ignore'
       | {'error', term()}.
 
+-type start_as_child_ret() ::
+	{'child', pid(), map()}
+      | 'ignore'
+      | {'error', term()}.
+
 
 
 
@@ -2452,6 +2459,29 @@ start_monitor(ServerName, Module, Args, Opts)
   when is_tuple(ServerName), is_atom(Module), is_list(Opts) ->
     gen:start(?MODULE, monitor, ServerName, Module, Args, Opts);
 start_monitor(ServerName, Module, Args, Opts) ->
+    error(badarg, [ServerName, Module, Args, Opts]).
+
+-spec start_as_child(
+        Module :: module(),
+	Args :: term(),
+	Opts :: [start_opt() | {'shutdown_priority', boolean()}]
+      ) -> start_as_child_ret().
+start_as_child(Module, Args, Opts)
+  when is_atom(Module), is_list(Opts) ->
+    gen:start(?MODULE, child, Module, Args, Opts);
+start_as_child(Module, Args, Opts) ->
+    error(badarg, [Module, Args, Opts]).
+
+-spec start_as_child(
+	ServerName :: server_name(),
+        Module :: module(),
+	Args :: term(),
+	Opts :: [start_opt() | {'shutdown_priority', boolean()}]
+      ) -> start_as_child_ret().
+start_as_child(ServerName, Module, Args, Opts)
+  when is_tuple(ServerName), is_atom(Module), is_list(Opts) ->
+    gen:start(?MODULE, child, ServerName, Module, Args, Opts);
+start_as_child(ServerName, Module, Args, Opts) ->
     error(badarg, [ServerName, Module, Args, Opts]).
 
 %% Stop a state machine
@@ -3314,22 +3344,23 @@ enter(
 %%%  gen callbacks
 
 -doc false.
-init_it(Starter, self, ServerRef, Module, Args, Opts) ->
-    init_it(Starter, self(), ServerRef, Module, Args, Opts);
-init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
+init_it(Starter, self, LinkP, ServerRef, Module, Args, Opts) ->
+    init_it(Starter, self(), LinkP, ServerRef, Module, Args, Opts);
+init_it(Starter, Parent, LinkP, ServerRef, Module, Args, Opts) ->
     Name = gen:get_proc_name(ServerRef),
     Debug = gen:debug_options(Name, Opts),
     HibernateAfterTimeout = gen:hibernate_after(Opts),
+    ShutdownPriority = gen:shutdown_priority(Opts),
     try Module:init(Args) of
 	Result ->
 	    init_result(
-              Starter, Parent, ServerRef, Module, Result,
-              Name, Debug, HibernateAfterTimeout)
+              Starter, Parent, LinkP, ServerRef, Module, Result,
+              Name, Debug, HibernateAfterTimeout, ShutdownPriority)
     catch
 	Result ->
 	    init_result(
-              Starter, Parent, ServerRef, Module, Result,
-              Name, Debug, HibernateAfterTimeout);
+              Starter, Parent, LinkP, ServerRef, Module, Result,
+              Name, Debug, HibernateAfterTimeout, ShutdownPriority);
 	Class:Reason:Stacktrace ->
 	    gen:unregister_name(ServerRef),
 	    error_info(
@@ -3348,17 +3379,28 @@ init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
 %%%       above monitor_return() in gen.erl!
 %%%
 
+init_ack_return(Parent, child, true) ->
+    erlang:link(Parent, [priority]),
+    {child, self(), #{alias => alias([priority])}};
+init_ack_return(_Parent, child, false) ->
+    {child, self(), #{alias => alias([])}};
+init_ack_return(Parent, link, true) ->
+    erlang:link(Parent, [priority]),
+    {ok, self()};
+init_ack_return(_Parent, _LinkP, _ShutdownPriority) ->
+    {ok, self()}.
+
 init_result(
-  Starter, Parent, ServerRef, Module, Result,
-  Name, Debug, HibernateAfterTimeout) ->
+  Starter, Parent, LinkP, ServerRef, Module, Result,
+  Name, Debug, HibernateAfterTimeout, ShutdownPriority) ->
     case Result of
 	{ok,State,Data} ->
-	    proc_lib:init_ack(Starter, {ok,self()}),
+	    proc_lib:init_ack(Starter, init_ack_return(Parent, LinkP, ShutdownPriority)),
             enter(
               Parent, Debug, Module, Name, HibernateAfterTimeout,
               State, Data, []);
 	{ok,State,Data,Actions} ->
-	    proc_lib:init_ack(Starter, {ok,self()}),
+	    proc_lib:init_ack(Starter, init_ack_return(Parent, LinkP, ShutdownPriority)),
             enter(
               Parent, Debug, Module, Name, HibernateAfterTimeout,
               State, Data, Actions);
