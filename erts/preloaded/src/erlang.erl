@@ -3645,7 +3645,7 @@ distributed system), otherwise `false`. A node is alive if it is started with:
 A node can also be alive if it has got a name from a call to
 `net_kernel:start/2` and has not been stopped by a call to `net_kernel:stop/0`.
 """.
--doc #{ category => distribution }.
+-doc #{ category => processes }.
 -spec is_alive() -> boolean().
 is_alive() ->
     erlang:node() =/= nonode@nohost orelse erts_internal:dynamic_node_name().
