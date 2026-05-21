@@ -2295,6 +2295,9 @@ BIF_RETTYPE erts_internal_purge_module_2(BIF_ALIST_2)
                 modp->old.code_hdr = NULL;
                 modp->old.code_length = 0;
                 modp->old.catches = BEAM_CATCHES_NIL;
+                modp->old.executable_region = NULL;
+                modp->old.writable_region = NULL;
+                modp->old.metadata = NULL;
                 ERTS_BIF_PREP_RET(ret, am_true);
             }
 

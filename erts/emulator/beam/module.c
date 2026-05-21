@@ -80,6 +80,9 @@ void erts_module_instance_init(struct erl_module_instance* modi)
     modi->nif = NULL;
     modi->num_breakpoints = 0;
     modi->num_traced_exports = 0;
+    modi->executable_region = NULL;
+    modi->writable_region = NULL;
+    modi->metadata = NULL;
     modi->unsealed = 0;
 }
 
