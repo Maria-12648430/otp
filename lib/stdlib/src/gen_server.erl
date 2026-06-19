@@ -190,6 +190,7 @@ using exit signals.
 -export([start/3, start/4,
 	 start_link/3, start_link/4,
          start_monitor/3, start_monitor/4,
+	 start_as_child/3, start_as_child/4,
 	 stop/1, stop/3,
 	 call/2, call/3,
          send_request/2, send_request/4,
@@ -216,7 +217,7 @@ using exit signals.
 -export([format_log/1, format_log/2]).
 
 %% Internal exports
--export([init_it/6]).
+-export([init_it/7]).
 
 -include("logger.hrl").
 
@@ -234,7 +235,8 @@ using exit signals.
     start_opt/0,
     enter_loop_opt/0,
     start_ret/0,
-    start_mon_ret/0]).
+    start_mon_ret/0,
+    start_as_child_ret/0]).
 
 -define(
    STACKTRACE(),
@@ -966,6 +968,11 @@ and a [`monitor/2,3`](`erlang:monitor/2`) [`MonRef`](`t:reference/0`).
       | 'ignore'
       | {'error', Reason :: term()}.
 
+-type start_as_child_ret() ::
+	{'child', Pid :: pid(), Extra :: map()}
+      | 'ignore'
+      | {'error', Reason :: term()}.
+
 %%% ---------------------------------------------------
 
 -doc """
@@ -1150,6 +1157,32 @@ start_monitor(ServerName, Module, Args, Options)
 start_monitor(ServerName, Module, Args, Options) ->
     error(badarg, [ServerName, Module, Args, Options]).
 
+-spec start_as_child(
+	Module     :: module(),
+	Args       :: term(),
+	Options    :: [start_opt() | {'shutdown_priority', boolean()}]
+       ) ->
+		   start_as_child_ret().
+%%
+start_as_child(Module, Args, Options)
+  when is_atom(Module), is_list(Options) ->
+    gen:start(?MODULE, child, Module, Args, Options);
+start_as_child(Module, Args, Options) ->
+    error(badarg, [Module, Args, Options]).
+
+-spec start_as_child(
+	ServerName :: server_name(),
+	Module     :: module(),
+	Args       :: term(),
+	Options    :: [start_opt() | {'shutdown_priority', boolean()}]
+       ) ->
+		   start_as_child_ret().
+%%
+start_as_child(ServerName, Module, Args, Options)
+  when is_tuple(ServerName), is_atom(Module), is_list(Options) ->
+    gen:start(?MODULE, child, ServerName, Module, Args, Options);
+start_as_child(ServerName, Module, Args, Options) ->
+    error(badarg, [ServerName, Module, Args, Options]).
 
 %% -----------------------------------------------------------------
 %% Stop a generic server and wait for it to terminate.
@@ -2226,16 +2259,28 @@ enter_loop(Mod, Options, State, ServerName, Action)
 %%% Finally an acknowledge is sent to Parent and the main
 %%% loop is entered.
 %%% ---------------------------------------------------
+
+init_ack_return(Parent, child, true) ->
+    erlang:link(Parent, [priority]),
+    {child, self(), #{alias => alias([priority])}};
+init_ack_return(_Parent, child, false) ->
+    {child, self(), #{alias => alias([])}};
+init_ack_return(Parent, link, true) ->
+    erlang:link(Parent, [priority]),
+    {ok, self()};
+init_ack_return(_Parent, _LinkP, _ShutdownPriority) ->
+    {ok, self()}.
+
 -doc false.
-init_it(Starter, self, Name, Mod, Args, Options) ->
-    init_it(Starter, self(), Name, Mod, Args, Options);
-init_it(Starter, Parent, Name0, Mod, Args, Options) ->
+init_it(Starter, self, LinkP, Name, Mod, Args, Options) ->
+    init_it(Starter, self(), LinkP, Name, Mod, Args, Options);
+init_it(Starter, Parent, LinkP, Name0, Mod, Args, Options) ->
     Name = gen:name(Name0),
     ServerData = server_data(Parent, Name, Mod, gen:hibernate_after(Options)),
     Debug = gen:debug_options(Name, Options),
     case init_it(Mod, Args) of
 	{ok, {ok, State}} ->
-	    proc_lib:init_ack(Starter, {ok, self()}),
+		    proc_lib:init_ack(Starter, init_ack_return(Parent, LinkP, gen:shutdown_priority(Options))),
 	    loop(ServerData, State, infinity, Debug);
 	{ok, {ok, State, Action} = Return} ->
             case handle_action(ServerData, Action) of
@@ -2243,7 +2288,7 @@ init_it(Starter, Parent, Name0, Mod, Args, Options) ->
 		    gen:unregister_name(Name0),
 		    exit({bad_return_value, Return});
                 LoopAction ->
-                    proc_lib:init_ack(Starter, {ok, self()}),
+                    proc_lib:init_ack(Starter, init_ack_return(Parent, LinkP, gen:shutdown_priority(Options))),
                     loop(ServerData, State, LoopAction, Debug)
             end;
 	{ok, {stop, Reason}} ->
